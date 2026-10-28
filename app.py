@@ -1,5 +1,5 @@
 import streamlit as st
-from openai import OpenAI
+from groq import Groq
 
 st.set_page_config(page_title="Reyaz's AI Chatbot", page_icon="🤖")
 st.title("Reyaz's AI Chatbot")
@@ -12,15 +12,13 @@ SYSTEM_PROMPT = (
 )
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
-client = OpenAI(
-    api_key=st.secrets["GROQ_API_KEY"],
-    base_url="https://api.groq.com/openai/v1",
-)
+# Streamlit Cloud: App settings -> Secrets
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 
 @st.cache_data(ttl=3600)
 def get_models():
-    """Groq se chalte hue chat models ki list lao."""
+    """Groq se available chat models ki list lao."""
     try:
         ids = [m.id for m in client.models.list().data]
         skip = ("whisper", "tts", "guard", "playai", "orpheus", "allam")
@@ -60,15 +58,21 @@ if prompt:
         try:
             stream = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": SYSTEM_PROMPT}]
-                         + st.session_state.messages,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    *st.session_state.messages,
+                ],
                 temperature=temperature,
                 stream=True,
             )
-            response = st.write_stream(stream)
+            response = st.write_stream(
+                chunk.choices[0].delta.content or ""
+                for chunk in stream
+            )
             st.session_state.messages.append(
                 {"role": "assistant", "content": response}
             )
         except Exception as e:
             st.error(f"Error: {e}")
-            st.session_state.messages.pop()  # failed message hata do
+            st.session_state.messages.pop()  # failed user message hata do
+

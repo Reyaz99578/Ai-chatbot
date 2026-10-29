@@ -616,7 +616,7 @@ with st.sidebar:
                 st.success("PDF processed successfully!")
 
             except Exception as e:
-                st.error(f"PDF processing error: {e}")
+                st.error(f"PDF processing error: {e}")   # <--- YE LINE ADD KI
 
     if st.session_state.pdf_hash:
         st.caption(f"📄 Loaded: {st.session_state.pdf_name}")
@@ -671,4 +671,25 @@ with st.sidebar:
                             st.session_state.admin_attempts = 0
                             st.rerun()
                         else:
-                         
+                            st.session_state.admin_attempts += 1
+                            st.error("Wrong password! Try again.")
+
+            else:
+                if st.button("Logout"):
+                    st.session_state.is_admin = False
+                    st.rerun()
+
+                if st.button("🗑️ Clear Chat"):
+                    st.session_state.messages = []
+                    st.rerun()
+
+                if st.button("🔄 Refresh dashboard data"):
+                    load_feedback.clear()
+                    st.rerun()
+
+                if st.button("📊 Open Dashboard"):
+                    show_dashboard = True
+                    st.rerun()
+
+    if show_dashboard:
+        render_dashboard()

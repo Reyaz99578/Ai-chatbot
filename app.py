@@ -616,7 +616,7 @@ with st.sidebar:
                 st.success("PDF processed successfully!")
 
             except Exception as e:
-                st.error(f"PDF processing error: {e}")   # <--- YE LINE ADD KI
+                st.error(f"PDF processing error: {e}")
 
     if st.session_state.pdf_hash:
         st.caption(f"📄 Loaded: {st.session_state.pdf_name}")
@@ -638,7 +638,7 @@ with st.sidebar:
         st.rerun()
 
     # --------------------------------------
-    # ADMIN LOGIN (only visible if ADMIN_PASSWORD is set in Secrets)
+    # ADMIN LOGIN
     # --------------------------------------
 
     try:
@@ -672,24 +672,76 @@ with st.sidebar:
                             st.rerun()
                         else:
                             st.session_state.admin_attempts += 1
-                            st.error("Wrong password! Try again.")
-
+                            st.error(f"Wrong password. Remaining attempts: {MAX_ADMIN_ATTEMPTS - st.session_state.admin_attempts}")
             else:
+                show_dashboard = True
                 if st.button("Logout"):
                     st.session_state.is_admin = False
                     st.rerun()
 
-                if st.button("🗑️ Clear Chat"):
-                    st.session_state.messages = []
-                    st.rerun()
+# Dashboard View
+if show_dashboard and st.session_state.is_admin:
+    render_dashboard()
+else:
+    # ==========================================
+    # 15. CHAT INTERFACE
+    # ==========================================
 
-                if st.button("🔄 Refresh dashboard data"):
-                    load_feedback.clear()
-                    st.rerun()
+    # Display existing chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message["role"] == "assistant":
+                render_assistant_extras(message)
 
-                if st.button("📊 Open Dashboard"):
-                    show_dashboard = True
-                    st.rerun()
+    # Chat input box
+    if prompt := st.chat_input("Ask a question..."):
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    if show_dashboard:
-        render_dashboard()
+        # Build context from PDF if available
+        context_text = ""
+        sources = []
+        if st.session_state.pdf_chunks and st.session_state.faiss_index:
+            sources = search_relevant_chunks(
+                prompt,
+                st.session_state.pdf_chunks,
+                st.session_state.faiss_index,
+                load_embedding_model(),
+            )
+            if sources:
+                context_text = "\n\n---\n\n".join([s["text"] for s in sources])
+
+        # Prepare messages for API
+        api_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if context_text:
+            api_messages.append({
+                "role": "system",
+                "content": f"PDF Reference Context:\n{context_text}"
+            })
+
+        # Append recent history
+        for m in st.session_state.messages[-MAX_HISTORY:]:
+            api_messages.append({"role": m["role"], "content": m["content"]})
+
+        # Get reply from Groq
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                reply, ok = get_reply(api_messages, model, temperature)
+                st.markdown(reply)
+
+                msg_id = str(uuid.uuid4())
+                assistant_message = {
+                    "role": "assistant",
+                    "content": reply,
+                    "id": msg_id,
+                    "question": prompt,
+                    "sources": sources,
+                    "model": model,
+                    "pdf_name": st.session_state.pdf_name,
+                }
+                st.session_state.messages.append(assistant_message)
+                render_assistant_extras(assistant_message)

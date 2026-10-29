@@ -1,5 +1,10 @@
+import csv
 import hashlib
+import hmac
+import uuid
+from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 
 import streamlit as st
 import numpy as np
@@ -18,8 +23,12 @@ from sentence_transformers import SentenceTransformer
 
 
 # ==========================================
-# 1. PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION + LOGO
 # ==========================================
+
+BASE_DIR = Path(__file__).parent
+LOGO_PATH = BASE_DIR / "logo.svg"
+FEEDBACK_FILE = BASE_DIR / "feedback.csv"
 
 st.set_page_config(
     page_title="Reyaz AI Assistant",
@@ -27,8 +36,17 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🤖 Reyaz AI Assistant")
-st.caption("Chat with AI and ask questions about your PDFs")
+logo_col, title_col = st.columns([1, 9], vertical_alignment="center")
+
+with logo_col:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=64)
+    else:
+        st.markdown("## 🤖")
+
+with title_col:
+    st.title("Reyaz AI Assistant")
+    st.caption("Chat with AI and ask questions about your PDFs")
 
 
 # ==========================================
@@ -215,7 +233,100 @@ def get_reply(api_messages, model, temperature):
 
 
 # ==========================================
-# 10. SESSION STATE
+# 10. FEEDBACK (SAVE TO CSV)
+# ==========================================
+
+FEEDBACK_FIELDS = [
+    "timestamp_utc",
+    "message_id",
+    "rating",
+    "comment",
+    "question",
+    "answer",
+    "model",
+    "pdf_name",
+]
+
+
+def safe_cell(value):
+    """Make a value safe for CSV/Excel (blocks formula injection)."""
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    if text[:1] in ("=", "+", "-", "@"):
+        text = "'" + text
+    return text
+
+
+def save_feedback(row):
+    """Append one feedback row to feedback.csv."""
+    file_exists = FEEDBACK_FILE.exists()
+
+    with open(FEEDBACK_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FEEDBACK_FIELDS)
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(
+            {field: safe_cell(row.get(field, "")) for field in FEEDBACK_FIELDS}
+        )
+
+
+def render_assistant_extras(message):
+    """Sources + feedback form shown under each assistant answer."""
+    msg_id = message.get("id")
+
+    # Sources used (only when PDF context was used)
+    if message.get("sources"):
+        with st.expander("📚 Sources used"):
+            for src in message["sources"]:
+                st.caption(f"Score: {src['score']:.2f}")
+                st.write(src["text"])
+
+    if not msg_id:
+        return
+
+    # Feedback already given for this answer
+    if msg_id in st.session_state.feedback_done:
+        st.caption("✅ Feedback saved. Thank you!")
+        return
+
+    with st.expander("💬 Give feedback"):
+        with st.form(key=f"fb_form_{msg_id}"):
+            rating = st.selectbox(
+                "Was this answer helpful?",
+                ["Select...", "Helpful", "Not Helpful"],
+                key=f"fb_rating_{msg_id}",
+            )
+            comment = st.text_area(
+                "Comment (optional)",
+                max_chars=500,
+                key=f"fb_comment_{msg_id}",
+            )
+            submitted = st.form_submit_button("Submit")
+
+        if submitted:
+            if rating == "Select...":
+                st.warning("Please choose Helpful or Not Helpful.")
+            else:
+                try:
+                    save_feedback({
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "message_id": msg_id,
+                        "rating": rating,
+                        "comment": comment.strip(),
+                        "question": message.get("question", ""),
+                        "answer": message["content"],
+                        "model": message.get("model", ""),
+                        "pdf_name": message.get("pdf_name", ""),
+                    })
+                    st.session_state.feedback_done.add(msg_id)
+                    st.rerun()
+                except OSError as e:
+                    st.error(f"Could not save feedback: {e}")
+
+
+# ==========================================
+# 11. SESSION STATE
 # ==========================================
 
 defaults = {
@@ -225,6 +336,7 @@ defaults = {
     "pdf_chunks": [],
     "faiss_index": None,
     "uploader_key": 0,
+    "feedback_done": set(),
 }
 
 for key, value in defaults.items():
@@ -233,7 +345,7 @@ for key, value in defaults.items():
 
 
 # ==========================================
-# 11. SIDEBAR SETTINGS
+# 12. SIDEBAR SETTINGS
 # ==========================================
 
 with st.sidebar:
@@ -323,18 +435,55 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    # --------------------------------------
+    # ADMIN: DOWNLOAD FEEDBACK CSV
+    # (only visible if ADMIN_PASSWORD is set in Secrets)
+    # --------------------------------------
+
+    try:
+        admin_password = st.secrets.get("ADMIN_PASSWORD", "")
+    except Exception:
+        admin_password = ""
+
+    if admin_password:
+        st.divider()
+        with st.expander("🔒 Admin"):
+            entered = st.text_input(
+                "Password", type="password", key="admin_pw_input"
+            )
+
+            if entered:
+                if hmac.compare_digest(
+                    entered.encode("utf-8"),
+                    str(admin_password).encode("utf-8"),
+                ):
+                    if FEEDBACK_FILE.exists():
+                        st.download_button(
+                            "⬇️ Download feedback.csv",
+                            data=FEEDBACK_FILE.read_bytes(),
+                            file_name="feedback.csv",
+                            mime="text/csv",
+                        )
+                    else:
+                        st.caption("No feedback yet.")
+                else:
+                    st.error("Wrong password.")
+
 
 # ==========================================
-# 12. DISPLAY CHAT HISTORY
+# 13. DISPLAY CHAT HISTORY
 # ==========================================
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+        if message["role"] == "assistant":
+            render_assistant_extras(message)
+
 
 # ==========================================
-# 13. USER INPUT AND RESPONSE
+# 14. USER INPUT AND RESPONSE
 # ==========================================
 
 prompt = st.chat_input("Ask anything or ask about your PDF...")
@@ -371,26 +520,37 @@ if prompt:
                 "was found for this question."
             )
 
-    # Only last MAX_HISTORY messages go to the API (token limit + cost)
+    # Send ONLY role + content to the API (extra keys like id/sources
+    # are for our app and the API would reject them)
     api_messages = [
         {"role": "system", "content": system_text}
-    ] + st.session_state.messages[-MAX_HISTORY:]
+    ] + [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state.messages[-MAX_HISTORY:]
+    ]
 
     with st.chat_message("assistant"):
         with st.spinner("Soch raha hoon..."):
             reply, ok = get_reply(api_messages, model, temperature)
-        st.markdown(reply)
 
-        if ok and hits:
-            with st.expander("📚 Sources used"):
-                for h in hits:
-                    st.caption(f"Score: {h['score']:.2f}")
-                    st.write(h["text"][:300] + "...")
+        if not ok:
+            st.markdown(reply)
 
     if ok:
-        st.session_state.messages.append(
-            {"role": "assistant", "content": reply}
-        )
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": reply,
+            "id": uuid.uuid4().hex[:10],
+            "question": prompt,
+            "model": model,
+            "pdf_name": st.session_state.pdf_name if hits else "",
+            "sources": [
+                {"text": h["text"][:300] + "...", "score": h["score"]}
+                for h in hits
+            ],
+        })
+        # Rerun so the answer + feedback form render from history
+        st.rerun()
     else:
         # Don't keep failed turns in history
         st.session_state.messages.pop()
